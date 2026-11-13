@@ -116,6 +116,7 @@ struct WindowAttributes {
     group: Option<x::Window>,
     decorations: Option<Decorations>,
     transient_for: Option<x::Window>,
+    suggests_float: bool,
 }
 
 impl WindowAttributes {
@@ -503,6 +504,7 @@ pub struct InnerServerState<S: X11Selection> {
     /// Cursor-shape equivalent of the X cursor currently displayed, from its
     /// XFixes name. `None` when it has no name or no equivalent.
     x_cursor_shape: Option<Shape>,
+    float_hints: Option<crate::FloatHints>,
 }
 
 impl<S: X11Selection> ServerState<NoConnection<S>> {
@@ -624,6 +626,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             current_scale: 1.0,
             cursor_shape_manager,
             x_cursor_shape: None,
+            float_hints: None,
             decoration_manager,
             world,
         };
@@ -935,6 +938,19 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             .unwrap()
             .attrs
             .override_redirect = override_redirect;
+    }
+
+    pub fn set_suggests_float(&mut self, window: x::Window, suggests_float: bool) {
+        let Some(id) = self.windows.get(&window).copied() else {
+            debug!("not setting suggests_float for unknown window {window:?}");
+            return;
+        };
+
+        self.world.get::<&mut WindowData>(id).unwrap().attrs.suggests_float = suggests_float;
+    }
+
+    pub fn set_float_hints(&mut self, float_hints: Option<crate::FloatHints>) {
+        self.float_hints = float_hints;
     }
 
     pub fn set_window_role(&mut self, window: x::Window, role: WindowRole) {
@@ -1625,11 +1641,15 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             }
         }
 
+        let suggests_float = window.attrs.suggests_float;
         drop(window);
         drop(group);
         drop(surface);
         if let Some(mut b) = buf.flatten() {
             b.run_on(&mut self.world);
+        }
+        if let Some(float_hints) = self.float_hints.as_mut() {
+            float_hints(toplevel.id().protocol_id(), suggests_float);
         }
 
         ToplevelData {

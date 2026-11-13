@@ -38,6 +38,11 @@ pub trait X11Selection {
 type EarlyServerState = ServerState<NoConnection<<RealConnection as XConnection>::X11Selection>>;
 type RealServerState = ServerState<RealConnection>;
 
+/// Called as each xdg_toplevel is created, before any of its requests reach
+/// the compositor, with the toplevel's protocol id and whether its X11 window
+/// suggests floating (`WindowRoleHeuristics::suggests_float`).
+pub type FloatHints = Box<dyn FnMut(u32, bool)>;
+
 pub trait RunData {
     fn display(&self) -> Option<&str>;
     fn listenfds(&mut self) -> Vec<OwnedFd>;
@@ -54,6 +59,11 @@ pub trait RunData {
     }
     fn xwayland_ready(&self, _display: String, _pid: u32) {}
     fn max_req_len_bytes(&self) -> Option<usize> {
+        None
+    }
+    /// For a compositor running satellite in its own process, which can look
+    /// the toplevel up by its id on satellite's connection.
+    fn float_hints(&self) -> Option<FloatHints> {
         None
     }
 }
@@ -195,6 +205,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     };
 
     let mut server_state = EarlyServerState::new(dh, data.server(), connection);
+    server_state.set_float_hints(data.float_hints());
     server_state.run();
 
     // Remove the lifetimes on our fds to avoid borrowing issues, since we know they will exist for

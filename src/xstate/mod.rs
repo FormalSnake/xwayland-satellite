@@ -992,6 +992,10 @@ impl XState {
         let window_types = self
             .get_net_wm_window_types(window)?
             .unwrap_or_else(Vec::new);
+        let modal = self
+            .get_net_wm_state(window)?
+            .is_some_and(|states| states.contains(&self.atoms.net_wm_state_modal));
+        let wm_window_role = self.get_wm_window_role(window)?;
 
         let heuristics = WindowRoleHeuristics {
             override_redirect,
@@ -1000,8 +1004,11 @@ impl XState {
             motif_wm_hints,
             wm_class,
             wm_normal_hints: size_hints,
+            modal,
+            wm_window_role,
         };
         let role = heuristics.guess_window_role(&self.window_atoms);
+        server_state.set_suggests_float(window, heuristics.suggests_float(&self.window_atoms));
         if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
             debug!(
                 target: "window_role_heuristics",
@@ -1134,6 +1141,22 @@ impl XState {
         PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
+    fn get_net_wm_state(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
+        let cookie = self.get_property_cookie(window, self.atoms.net_wm_state, x::ATOM_ATOM, 10);
+        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
+    }
+
+    fn get_wm_window_role(&self, window: x::Window) -> XResult<Option<String>> {
+        let cookie =
+            self.get_property_cookie(window, self.atoms.wm_window_role, x::ATOM_STRING, 256);
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u8] = reply.value();
+            String::from_utf8_lossy(data.split(|byte| *byte == 0).next().unwrap()).to_string()
+        };
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
+    }
+
     fn get_override_redirect(&self, window: x::Window) -> XResult<bool> {
         self.connection
             .wait_for_reply(
@@ -1237,6 +1260,8 @@ xcb::atoms_struct! {
         net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
+        net_wm_state_modal => b"_NET_WM_STATE_MODAL" only_if_exists = false,
+        wm_window_role => b"WM_WINDOW_ROLE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
         wm_maximized_vert => b"_NET_WM_STATE_MAXIMIZED_VERT" only_if_exists = false,
         wm_maximized_horz => b"_NET_WM_STATE_MAXIMIZED_HORZ" only_if_exists = false,
@@ -1276,6 +1301,9 @@ xcb::atoms_struct! {
         utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
         tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP" only_if_exists = false,
         combo => b"_NET_WM_WINDOW_TYPE_COMBO" only_if_exists = false,
+        toolbar => b"_NET_WM_WINDOW_TYPE_TOOLBAR" only_if_exists = false,
+        dock => b"_NET_WM_WINDOW_TYPE_DOCK" only_if_exists = false,
+        kde_override => b"_KDE_NET_WM_WINDOW_TYPE_OVERRIDE" only_if_exists = false,
     }
 }
 
@@ -1488,8 +1516,46 @@ struct WindowRoleHeuristics {
     motif_wm_hints: Option<motif::Hints>,
     wm_class: Option<String>,
     wm_normal_hints: Option<WmNormalHints>,
+    modal: bool,
+    wm_window_role: Option<String>,
 }
 impl WindowRoleHeuristics {
+    /// Hyprland's `suggestsFloat` for an X11 window (`X11Backend.cpp`
+    /// `traitsFrom`). A compositor sees only the xdg_toplevel, which carries
+    /// the parent and size limits but not the window type, the modal state or
+    /// a parent that is not mapped, so this is handed to it through
+    /// `RunData::float_hints`.
+    fn suggests_float(&self, window_atoms: &WindowTypes) -> bool {
+        let floating_types = [
+            window_atoms.dialog,
+            window_atoms.splash,
+            window_atoms.toolbar,
+            window_atoms.utility,
+            window_atoms.tooltip,
+            window_atoms.popup_menu,
+            window_atoms.dock,
+            window_atoms.dropdown_menu,
+            window_atoms.menu,
+            window_atoms.kde_override,
+        ];
+        let fixed_size = self.wm_normal_hints.is_some_and(|hints| {
+            hints
+                .min_size
+                .zip(hints.max_size)
+                .is_some_and(|(min, max)| min.width > 0 && min.height > 0 && min == max)
+        });
+        let role_floats = self
+            .wm_window_role
+            .as_deref()
+            .is_some_and(|role| role.contains("task_dialog") || role.contains("pop-up"));
+        self.window_types.iter().any(|ty| floating_types.contains(ty))
+            || self.modal
+            || self.has_transient_for
+            || role_floats
+            || self.override_redirect
+            || fixed_size
+    }
+
     fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
         if self.override_redirect {
             return WindowRole::Popup;
@@ -1562,7 +1628,8 @@ impl WindowRoleHeuristics {
     fn log(&self, connection: &xcb::Connection) -> String {
         format!(
             "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
-            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}",
+            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}, modal: {}, \
+            wm_window_role: {:?}",
             self.override_redirect,
             self.has_transient_for,
             self.window_types
@@ -1572,6 +1639,8 @@ impl WindowRoleHeuristics {
             self.motif_wm_hints,
             self.wm_class,
             self.wm_normal_hints,
+            self.modal,
+            self.wm_window_role,
         )
     }
 }

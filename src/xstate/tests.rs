@@ -15,6 +15,9 @@ impl WindowTypes {
             utility: Atom::new(0x109),
             tooltip: Atom::new(0x109),
             combo: Atom::new(0x10a),
+            toolbar: Atom::new(0x10b),
+            dock: Atom::new(0x10c),
+            kde_override: Atom::new(0x10d),
         }
     }
 }
@@ -240,6 +243,7 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility, win_types.normal],
             wm_class: Some("wechat".into()),
             wm_normal_hints: Some(wm_normal_hints.into()),
+            ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -261,6 +265,7 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             wm_class: Some("Godot".into()),
+            ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -529,5 +534,58 @@ mod window_role_heuristics {
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Splash);
+    }
+
+    #[test]
+    fn floats_by_hyprlands_x11_traits() {
+        let win_types = WindowTypes::new();
+        let floats = |win: WindowRoleHeuristics| win.suggests_float(&win_types);
+
+        assert!(!floats(WindowRoleHeuristics::default()));
+        assert!(!floats(WindowRoleHeuristics {
+            window_types: vec![win_types.normal],
+            wm_normal_hints: Some(WmNormalHints::new().min_size(300, 200).into()),
+            wm_window_role: Some("browser".into()),
+            ..Default::default()
+        }));
+        for ty in [
+            win_types.dialog,
+            win_types.splash,
+            win_types.toolbar,
+            win_types.utility,
+            win_types.dock,
+            win_types.menu,
+            win_types.kde_override,
+        ] {
+            assert!(floats(WindowRoleHeuristics {
+                window_types: vec![ty, win_types.normal],
+                ..Default::default()
+            }));
+        }
+        assert!(floats(WindowRoleHeuristics {
+            modal: true,
+            ..Default::default()
+        }));
+        assert!(floats(WindowRoleHeuristics {
+            has_transient_for: true,
+            ..Default::default()
+        }));
+        assert!(floats(WindowRoleHeuristics {
+            wm_window_role: Some("GtkFileChooserDialog-task_dialog".into()),
+            ..Default::default()
+        }));
+        assert!(floats(WindowRoleHeuristics {
+            wm_window_role: Some("pop-up".into()),
+            ..Default::default()
+        }));
+        assert!(floats(WindowRoleHeuristics {
+            wm_normal_hints: Some(WmNormalHints::new().min_size(400, 300).max_size(400, 300).into()),
+            ..Default::default()
+        }));
+        // One fixed axis is not a fixed size for an X11 window.
+        assert!(!floats(WindowRoleHeuristics {
+            wm_normal_hints: Some(WmNormalHints::new().min_size(400, 300).max_size(400, 900).into()),
+            ..Default::default()
+        }));
     }
 }

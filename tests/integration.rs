@@ -29,6 +29,7 @@ struct TestDataInner {
     server: Mutex<Option<UnixStream>>,
     pid: Mutex<Option<u32>>,
     quit_rx: Mutex<Option<UnixStream>>,
+    float_hints: Arc<Mutex<HashMap<u32, bool>>>,
 }
 
 #[derive(Default, Clone)]
@@ -86,6 +87,13 @@ impl xwls::RunData for TestData {
     fn max_req_len_bytes(&self) -> Option<usize> {
         Some(500)
     }
+
+    fn float_hints(&self) -> Option<xwls::FloatHints> {
+        let hints = self.float_hints.clone();
+        Some(Box::new(move |toplevel, floats| {
+            hints.lock().unwrap().insert(toplevel, floats);
+        }))
+    }
 }
 
 struct Fixture {
@@ -95,6 +103,7 @@ struct Fixture {
     display: String,
     pid: Pid,
     quit_tx: UnixStream,
+    data: TestData,
 }
 
 impl Drop for Fixture {
@@ -193,6 +202,7 @@ impl Fixture {
             display,
             pid: Pid::from_raw(pid as _).expect("Xwayland PID was invalid?"),
             quit_tx,
+            data: our_data,
         }
     }
     fn new() -> Self {
@@ -370,6 +380,7 @@ xcb::atoms_struct! {
         wm_check => b"_NET_SUPPORTING_WM_CHECK",
         win_type => b"_NET_WM_WINDOW_TYPE",
         win_type_normal => b"_NET_WM_WINDOW_TYPE_NORMAL",
+        win_type_dialog => b"_NET_WM_WINDOW_TYPE_DIALOG",
         win_type_menu => b"_NET_WM_WINDOW_TYPE_MENU",
         win_type_popup_menu => b"_NET_WM_WINDOW_TYPE_POPUP_MENU",
         win_type_dropdown_menu => b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
@@ -2521,4 +2532,37 @@ fn client_minimize() {
 
     f.wait_and_dispatch();
     assert!(f.testwl.get_surface_data(surface).unwrap().minimized);
+}
+
+#[test]
+fn float_hints_reach_the_compositor() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let mut float_hint = |connection: &mut Connection, window_type: x::Atom| {
+        let window = connection.new_window(connection.root, 0, 0, 300, 200, false);
+        connection.set_property(
+            window,
+            x::ATOM_ATOM,
+            connection.atoms.win_type,
+            &[window_type],
+        );
+        connection.map_window(window);
+        f.wait_and_dispatch();
+        let surface = f
+            .testwl
+            .last_created_surface_id()
+            .expect("No surface created!");
+        f.configure_and_verify_new_toplevel(connection, window, surface);
+        let data = f.testwl.get_surface_data(surface).unwrap();
+        assert!(data.toplevel().parent.is_none());
+        let id = data.toplevel().toplevel.id().protocol_id();
+        f.data.float_hints.lock().unwrap().get(&id).copied()
+    };
+
+    let normal = connection.atoms.win_type_normal;
+    let dialog = connection.atoms.win_type_dialog;
+    assert_eq!(float_hint(&mut connection, normal), Some(false));
+    // A resizable dialog with no WM_TRANSIENT_FOR is an ordinary
+    // xdg_toplevel; only the hint says it floats.
+    assert_eq!(float_hint(&mut connection, dialog), Some(true));
 }
